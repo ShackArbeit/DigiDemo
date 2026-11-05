@@ -270,6 +270,86 @@ def load_incomes(path: Path | None = None) -> pd.DataFrame:
     return pd.read_csv(path, encoding="utf-8-sig")
 
 
+# ---------------------------------------------------------------------------
+# Demo 3：MyData 概念模擬的民眾與地政資料
+# ---------------------------------------------------------------------------
+
+# 主角：固定的基本資料，錄影時每次都一樣（身分證字號仍由產生器產生，保證檢查碼正確）
+PROTAGONIST = {"name": "王小明", "gender": "M", "birthday": "1985-03-15"}
+
+LAND_SECTIONS = ["仁愛", "和平", "興安", "福德", "長春", "成功", "中興", "永安"]
+REGISTRATION_REASONS = ["買賣", "買賣", "買賣", "繼承", "贈與", "拍賣"]
+
+
+def _random_land_record(rng: random.Random, share: str | None = None) -> dict:
+    """一筆地政資料：地號、房屋地址、持分、建物面積、公告土地現值、登記日期、登記原因、他項權利。"""
+    address, district = _random_address(rng)
+    section = rng.choice(["一", "二", "三", "四"])
+    year = rng.randint(1995, 2025)
+    has_mortgage = rng.random() < 0.6
+    return {
+        "land_number": f"{district}{rng.choice(LAND_SECTIONS)}段{section}小段 "
+                       f"{rng.randint(1, 999):04d}-0000 地號",
+        "building_address": address,
+        "ownership_share": share or rng.choice(["1/1", "1/1", "1/1", "1/2", "1/3", "1/4"]),
+        "building_area_m2": round(rng.uniform(40, 180), 2),
+        "announced_land_value": rng.randint(15, 120) * 10_000,   # 元/平方公尺
+        "registration_date": date(year, rng.randint(1, 12), rng.randint(1, 28)).isoformat(),
+        "registration_reason": rng.choice(REGISTRATION_REASONS),
+        "mortgage": (f"最高限額抵押權，設定金額 {rng.randint(3, 30) * 120} 萬元"
+                     if has_mortgage else "無"),
+    }
+
+
+def generate_citizens(n_others: int = 20, seed: int = 2026) -> tuple[list[dict], list[dict]]:
+    """
+    產生 Demo 3 的民眾與地政資料：主角王小明 + n_others 位其他民眾。
+    回傳 (citizens, land_records)，citizen_id 依序為 C001、C002……（C001 一定是王小明）。
+    """
+    rng = random.Random(seed)
+    fake = Faker("zh_TW")
+    fake.seed_instance(seed)
+
+    citizens, land_records = [], []
+    used_ids = set()
+
+    def new_id(gender: str) -> str:
+        id_number = generate_tw_id(rng, gender=gender, letter="A")
+        while id_number in used_ids:
+            id_number = generate_tw_id(rng, gender=gender, letter="A")
+        used_ids.add(id_number)
+        return id_number
+
+    # 主角王小明：兩筆不動產（一筆單獨所有、一筆與配偶各持分 1/2）
+    citizens.append({
+        "citizen_id": "C001",
+        "national_id": new_id(PROTAGONIST["gender"]),
+        "name": PROTAGONIST["name"],
+        "gender": "男",
+        "birthday": PROTAGONIST["birthday"],
+        "phone": _random_mobile(rng),
+    })
+    land_records.append({"citizen_id": "C001", **_random_land_record(rng, share="1/1")})
+    land_records.append({"citizen_id": "C001", **_random_land_record(rng, share="1/2")})
+
+    # 其他民眾：每人 0～2 筆不動產
+    for i in range(2, n_others + 2):
+        gender = rng.choice(["M", "F"])
+        citizen_id = f"C{i:03d}"
+        citizens.append({
+            "citizen_id": citizen_id,
+            "national_id": new_id(gender),
+            "name": fake.name_male() if gender == "M" else fake.name_female(),
+            "gender": "男" if gender == "M" else "女",
+            "birthday": _random_birthday(rng, 25, 80).isoformat(),
+            "phone": _random_mobile(rng),
+        })
+        for _ in range(rng.choice([0, 1, 1, 2])):
+            land_records.append({"citizen_id": citizen_id, **_random_land_record(rng)})
+
+    return citizens, land_records
+
+
 if __name__ == "__main__":
     for output in (save_applicants_csv(), save_incomes_csv()):
         print(f"已產生 {output}")
