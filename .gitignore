@@ -1,0 +1,12 @@
+# 合成資料不對外散布（身分證號可能碰巧與真人相同）
+data/*
+!data/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Demo 3 SQLite
+*.db
