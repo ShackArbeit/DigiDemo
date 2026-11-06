@@ -258,3 +258,20 @@ def test_audit_logs_is_read_only_and_shows_chain(client):
     second = client.get("/audit/logs").json()["entries"]
     assert len(first) == len(second) == 1                      # 查看不會新增紀錄
     assert first[0]["prev_hash"] == "0" * 64 and len(first[0]["hash"]) == 64
+
+
+def test_normal_flow_still_works_after_clock_advance(client):
+    """回歸測試：情境 4 快轉時鐘後，不重設就再跑情境 1，仍要成功。
+    （曾因 pyjwt 用電腦真實時間檢查 iat，誤判令牌「尚未生效」而回 401。）"""
+    client.post("/demo/advance-clock", json={"days": 31})
+    token = get_token(client, create_consent(client)["consent_id"])
+    r = fetch(client, token, ["building_address"])
+    assert r.status_code == 200, r.json()
+
+
+def test_token_error_messages_are_specific(client):
+    token = get_token(client, create_consent(client)["consent_id"])
+    header, payload, signature = token.split(".")
+    tampered = f"{header}.{payload}.{signature[:-4]}AAAA"            # 改掉簽章
+    assert "簽章錯誤" in fetch(client, tampered).json()["detail"]
+    assert "格式不符" in fetch(client, "not-a-jwt").json()["detail"]

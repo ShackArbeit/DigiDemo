@@ -23,7 +23,9 @@ import streamlit as st  # noqa: E402
 
 from demo3.db import LAND_FIELDS  # noqa: E402
 
-API_URL = os.environ.get("MYDATA_API_URL", "http://localhost:8000")
+# 用 127.0.0.1 而不是 localhost：Windows 上 localhost 會先嘗試 IPv6（::1），
+# 但 uvicorn 只監聽 IPv4，每次連線都要白等約 2 秒才改用 IPv4
+API_URL = os.environ.get("MYDATA_API_URL", "http://127.0.0.1:8000")
 CITIZEN_ID = "C001"
 CITIZEN_NAME = "王小明"
 BANK = {"client_id": "bank-demo", "client_secret": "bank-demo-secret"}
@@ -96,9 +98,17 @@ section[data-testid="stSidebar"] .stButton button p {{ font-size: 1.15rem; font-
 # 呼叫後端 API
 # ---------------------------------------------------------------------------
 
+@st.cache_resource
+def http_client() -> httpx.Client:
+    """
+    整個介面共用一條 HTTP 連線（cache_resource：只建立一次，之後重複使用）。
+    每次請求都建立新連線要花數百毫秒；重複使用同一條連線只要幾毫秒。
+    """
+    return httpx.Client(base_url=API_URL, timeout=10)
+
+
 def api(method: str, path: str, **kwargs) -> tuple[int, dict]:
-    with httpx.Client(base_url=API_URL, timeout=10) as client:
-        r = client.request(method, path, **kwargs)
+    r = http_client().request(method, path, **kwargs)
     try:
         body = r.json()
     except ValueError:
@@ -108,7 +118,7 @@ def api(method: str, path: str, **kwargs) -> tuple[int, dict]:
 
 def api_alive() -> bool:
     try:
-        return api("GET", "/")[0] == 200
+        return api("GET", "/", timeout=2)[0] == 200
     except httpx.HTTPError:
         return False
 
@@ -169,7 +179,7 @@ def scope_tags(allowed: list[str], highlight_denied: list[str] = ()) -> str:
 
 def failed_check(detail: str) -> int:
     """依拒絕原因推斷是五道檢查中的第幾道失敗（0 起算）。"""
-    if "簽章" in detail or "缺少" in detail:
+    if "令牌無效" in detail or "缺少授權令牌" in detail:
         return 0
     if "不是這位民眾" in detail:
         return 1
@@ -406,10 +416,14 @@ def render_scenario_5() -> None:
         return
 
     by_id = {e["log_id"]: e for e in chain}
+    # 預設值只在第一次（或原本的選擇已不在清單中，例如重設後）寫入 session_state，
+    # 之後選單只讀取這個值、不再傳 index：竄改後選擇不會跳到下一筆「拒絕」，
+    # 也不會出現「同時用預設值和 Session State 設定」的警告
+    if st.session_state.get("tamper_target") not in by_id:
+        st.session_state["tamper_target"] = default
     a, b, c = st.columns([1.3, 1, 1])
     with a:
-        # key 讓選擇在重新整理後保持不變（否則竄改後預設值會跳到下一筆「拒絕」）
-        target = st.selectbox("要竄改的紀錄", list(by_id), index=list(by_id).index(default), key="tamper_target",
+        target = st.selectbox("要竄改的紀錄", list(by_id), key="tamper_target",
                               format_func=lambda i: f"#{i}　{ACTION_NAMES.get(by_id[i]['action'], '')}"
                                                     f"／{by_id[i]['result']}")
     with b:

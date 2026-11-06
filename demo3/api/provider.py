@@ -46,12 +46,21 @@ def get_land_records(citizen_id: str,
     # 1. 驗證令牌簽章
     if not authorization or not authorization.lower().startswith("bearer "):
         deny(401, "缺少授權令牌")
+    # 依實際原因回報，避免把所有錯誤都說成「簽章錯誤」而誤導排查
     try:
         claims = decode_token(authorization.split(" ", 1)[1])
-    except jwt.InvalidTokenError:
-        deny(401, "授權令牌無效（簽章錯誤或格式不符）")
+    except jwt.InvalidSignatureError:
+        deny(401, "授權令牌無效：簽章錯誤（令牌被竄改或偽造）")
+    except jwt.DecodeError:
+        deny(401, "授權令牌無效：格式不符")
+    except jwt.InvalidTokenError as e:
+        deny(401, f"授權令牌無效：{e}")
 
     actor, consent_id = claims["sub"], claims["consent_id"]
+
+    # 令牌的簽發時間不能在未來（用系統唯一的時鐘判斷；容許 60 秒誤差）
+    if claims["iat"] > current.timestamp() + 60:
+        deny(401, "授權令牌無效：簽發時間在未來", actor, consent_id)
 
     # 2. 令牌是否屬於這位民眾
     if claims.get("citizen_id") != citizen_id:

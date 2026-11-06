@@ -18,14 +18,11 @@ import streamlit as st  # noqa: E402
 
 from demo1.deidentify import deidentify_dataframe  # noqa: E402
 from demo1.detector import find_pii, scan_dataframe  # noqa: E402
-from demo1.kanon import (DEFAULT_QUASI_IDENTIFIERS, find_violations,  # noqa: E402
-                         group_sizes, kanon_summary, suppress)
-from shared.fake_data import DATA_DIR, generate_applicants, load_applicants  # noqa: E402
+from demo1.kanon import DEFAULT_QUASI_IDENTIFIERS, kanon_summary, suppress  # noqa: E402
 
 # 狀態色（固定用途，不拿來當一般系列色）
 COLOR_CRITICAL = "#d03b3b"
 COLOR_WARNING = "#fab219"
-COLOR_GOOD = "#0ca30c"
 
 # 直接識別個資 → 高風險；可間接識別 → 中風險
 HIGH_RISK_TYPES = {"身分證字號", "手機", "市話", "Email", "姓名"}
@@ -56,19 +53,14 @@ mark.pii { background: #fde2e2; color: #8a1c1c; padding: 0 4px; border-radius: 4
 # ---------------------------------------------------------------------------
 
 @st.cache_data
-def prepare(file_bytes: bytes | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def prepare(file_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    讀資料 → 偵測 → 去識別化，結果快取起來，拉滑桿時不用重算。
-    快取的鍵是「上傳檔案的位元組」（None = 預設名冊），而不是 DataFrame：
+    讀取上傳的 CSV → 偵測 → 去識別化，結果快取起來，拉滑桿時不用重算。
+    快取的鍵是「上傳檔案的位元組」，而不是 DataFrame：
     Streamlit 雜湊 DataFrame 在部分 pandas 版本會失敗（UnhashableParamError）。
+    所有欄位都當文字讀入，手機開頭的 0 才不會不見。
     """
-    if file_bytes is not None:
-        raw = pd.read_csv(io.BytesIO(file_bytes), dtype=str, keep_default_na=False,
-                          encoding="utf-8-sig")
-    elif (DATA_DIR / "applicants.csv").exists():
-        raw = load_applicants()
-    else:
-        raw = generate_applicants()
+    raw = pd.read_csv(io.BytesIO(file_bytes), dtype=str, keep_default_na=False, encoding="utf-8-sig")
     return raw, scan_dataframe(raw), deidentify_dataframe(raw)
 
 
@@ -107,14 +99,23 @@ def highlight_pii(text: str) -> str:
 
 with st.sidebar:
     st.header("資料來源")
-    uploaded = st.file_uploader("上傳 CSV（不上傳則使用預設名冊）", type="csv")
+    uploaded = st.file_uploader("上傳 CSV 檔案", type="csv")
     st.caption("⚠️ 本 demo 所有資料皆為程式產生的合成資料，不含任何真實個人資料。")
 
-raw, scan_report, deid = prepare(uploaded.getvalue() if uploaded is not None else None)
-source_name = uploaded.name if uploaded is not None else "社福補助申請名冊（合成資料）"
-
 st.title("🔍 Demo 1｜個資偵測與去識別化")
-st.markdown(f"**資料：** {source_name}，共 **{len(raw):,}** 筆、{len(raw.columns)} 個欄位")
+
+# 一開始畫面空白：等使用者上傳 CSV 後才開始分析
+if uploaded is None:
+    st.info("👈 請從左側上傳 CSV 檔案，系統會自動偵測個資、去識別化，並檢查 k-匿名風險。")
+    st.stop()
+
+try:
+    raw, scan_report, deid = prepare(uploaded.getvalue())
+except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as e:
+    st.error(f"無法讀取「{uploaded.name}」，請確認是 UTF-8 編碼的 CSV 檔案。（{type(e).__name__}）")
+    st.stop()
+
+st.markdown(f"**資料：** {uploaded.name}，共 **{len(raw):,}** 筆、{len(raw.columns)} 個欄位")
 
 tab1, tab2, tab3 = st.tabs(["① 偵測", "② 去識別化", "③ 風險檢查"])
 
@@ -218,35 +219,31 @@ with tab3:
     if summary["不滿足k的紀錄數"]:
         st.error(f"⚠️ 姓名、身分證都遮罩了，仍有 **{summary['不滿足k的紀錄數']} 筆**紀錄"
                  f"所在的群組不到 {k} 人，可能被認出來。")
-    else:
-        st.success(f"✓ 所有紀錄都滿足 {k}-匿名。")
 
-    # 長條圖：x = 群組人數，y = 紀錄數；不滿足 k 的用紅色
-    sizes = group_sizes(deid, qis)
-    counts = sizes.value_counts().sort_index()
-    at_risk = counts.index < k
+    # 趨勢圖：x = k 值（2～10），y = 不滿足 k 的紀錄數；目前的 k 以大圓點標出
+    k_values = list(range(2, 11))
+    trend = [kanon_summary(deid, kv, qis)["不滿足k的紀錄數"] for kv in k_values]
+    current = trend[k_values.index(k)]
     fig = go.Figure()
-    fig.add_bar(x=counts.index[at_risk], y=counts[at_risk], name=f"⚠ 不滿足 k（< {k} 人）",
-                marker_color=COLOR_CRITICAL,
-                hovertemplate="群組人數 %{x} 人<br>紀錄 %{y} 筆<extra></extra>")
-    fig.add_bar(x=counts.index[~at_risk], y=counts[~at_risk], name=f"✓ 滿足 k（≥ {k} 人）",
-                marker_color=COLOR_GOOD,
-                hovertemplate="群組人數 %{x} 人<br>紀錄 %{y} 筆<extra></extra>")
-    fig.add_vline(x=k - 0.5, line_dash="dash", line_color="#52514e", line_width=2,
-                  annotation_text=f"k = {k}", annotation_position="top",
-                  annotation_font_size=18)
+    fig.add_scatter(x=k_values, y=trend, mode="lines+markers", name="不滿足 k 的紀錄數",
+                    line=dict(color=COLOR_CRITICAL, width=3), marker=dict(size=9),
+                    hovertemplate="k = %{x}<br>不滿足 k 的紀錄 %{y} 筆<extra></extra>")
+    # 目前選擇的 k：放大的圓點＋白色外框＋直接標註數字
+    fig.add_scatter(x=[k], y=[current], mode="markers", showlegend=False, hoverinfo="skip",
+                    marker=dict(size=20, color=COLOR_CRITICAL, line=dict(color="#ffffff", width=3)))
+    fig.add_annotation(x=k, y=current, text=f"<b>k = {k}：{current} 筆</b>", showarrow=True,
+                       arrowhead=0, ax=0, ay=-45, font=dict(size=20, color="#0b0b0b"),
+                       bgcolor="#ffffff", bordercolor="#c3c2b7", borderpad=4)
     fig.update_layout(
-        height=420, bargap=0.15, margin=dict(t=40, b=40, l=40, r=20),
-        xaxis=dict(title="群組人數（同一組有幾人）", dtick=1, title_font_size=18,
-                   tickfont_size=16, showgrid=False),
-        yaxis=dict(title="紀錄數", title_font_size=18, tickfont_size=16, gridcolor="#e1e0d9"),
-        legend=dict(orientation="h", y=1.12, x=0, font_size=18),
+        title=dict(text="k 越大，越多紀錄不滿足 k-匿名", font_size=20, x=0),
+        height=420, margin=dict(t=60, b=50, l=60, r=30), showlegend=False,
+        xaxis=dict(title="k 值（每組至少要有幾人）", dtick=1, title_font_size=18,
+                   tickfont_size=16, showgrid=False, range=[1.6, 10.4]),
+        yaxis=dict(title="不滿足 k 的紀錄數（筆）", title_font_size=18, tickfont_size=16,
+                   gridcolor="#e1e0d9", rangemode="tozero"),
         plot_bgcolor="#ffffff",
     )
     st.plotly_chart(fig, width="stretch")
-
-    with st.expander(f"查看不滿足 k={k} 的紀錄"):
-        st.dataframe(find_violations(deid, k, qis), hide_index=True, width="stretch")
 
     st.subheader("處理方式：抑制（移除不滿足 k 的紀錄）")
     use_suppress = st.checkbox("啟用抑制")

@@ -49,6 +49,9 @@ button[data-baseweb="tab"] p { font-size: 1.4rem !important; font-weight: 600; }
                background: #f5f5f2; border-radius: 8px; }
 .policy-line { font-size: 1.6rem; font-weight: 700; padding: 18px 24px;
                border-left: 6px solid #2a78d6; background: #eef4fc; border-radius: 6px; }
+.katex { font-size: 1.45em !important; }
+.step-title { font-size: 1.3rem; font-weight: 800; margin-bottom: 2px; }
+.step-why { font-size: 1.0rem; color: #52514e; min-height: 3.2em; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,7 +84,7 @@ df = load_data()
 target_district = df.loc[df["id"] == TARGET_ID, "區"].iloc[0]
 
 st.title("📊 Demo 2｜差分隱私統計發布")
-st.markdown(f"**資料：** 虛構城市 8 個區的居民年收入，共 **{len(df):,}** 筆（程式產生的合成資料）")
+st.markdown(f"**資料：** 虛構城市 8 個區的居民年收入，共 **{len(df):,}** 筆")
 
 tab1, tab2, tab3 = st.tabs(["第一幕：差分攻擊", "第二幕：加入差分隱私", "第三幕：取捨曲線"])
 
@@ -91,8 +94,8 @@ tab1, tab2, tab3 = st.tabs(["第一幕：差分攻擊", "第二幕：加入差�
 # ---------------------------------------------------------------------------
 
 with tab1:
-    st.header("只發布「平均數」，就安全了嗎？")
-    st.markdown(f"統計單位發布了兩個看似無害的數字。攻擊者只知道：**目標住在{target_district}**。")
+    st.header("「平均數」真的安全了嗎？")
+    st.markdown(f"統計單位發布了兩個貌似不相關的數字。攻擊者只知道：**目標住在{target_district}**。")
 
     exact = differencing_attack(df, TARGET_ID)
     c1, c2 = st.columns(2)
@@ -100,12 +103,14 @@ with tab1:
               money(exact["查詢A_平均"]), f"{exact['查詢A_人數']} 人", delta_color="off")
     c2.metric(f"查詢 B：{target_district}「排除目標」後平均收入",
               money(exact["查詢B_平均"]), f"{exact['查詢B_人數']} 人", delta_color="off")
-    st.caption(f"兩個平均數只差 {exact['查詢A_平均'] - exact['查詢B_平均']:,.0f} 元，看起來無關緊要……")
+    st.caption(f"兩個平均數只差 {exact['查詢A_平均'] - exact['查詢B_平均']:,.0f} 元，貌似無關聯……")
 
     if st.button("🔓 執行差分攻擊", type="primary"):
         st.session_state["attack_run"] = True
 
     if st.session_state.get("attack_run"):
+        # 代數形式：兩個總和相減，剩下的就是目標一個人的收入
+        st.latex(r"x_{\text{target}} = n \cdot \bar{A} - (n-1) \cdot \bar{B}")
         st.markdown(f"""
 <div class="big-formula">
 目標收入 = 平均A × {exact['查詢A_人數']} − 平均B × {exact['查詢B_人數']}<br>
@@ -134,12 +139,66 @@ with tab2:
     # 每個 ε 用固定 seed → 錄影時同一個 ε 永遠顯示同樣的數字
     dp = attack_with_dp(df, TARGET_ID, eps, rng=np.random.default_rng([SEED, int(eps * 100)]))
 
-    c1, c2 = st.columns(2)
-    c1.metric("查詢 A（差分隱私發布）", money(dp["查詢A_平均"]),
-              f"真實 {money(exact['查詢A_平均'])}", delta_color="off")
-    c2.metric("查詢 B（差分隱私發布）", money(dp["查詢B_平均"]),
-              f"真實 {money(exact['查詢B_平均'])}", delta_color="off")
-    st.caption("發布的平均數仍然接近真實值，對統計用途來說夠用。")
+    # --- 四個步驟：公式 + 以目標所在區的實際數字代入（隨 ε 滑桿即時更新） ---
+    district_values = df.loc[df["區"] == target_district, "年收入"].to_numpy(dtype=float)
+    n = len(district_values)
+    n_clipped = int((district_values > DEFAULT_BOUND).sum())
+    clipped_mean = clip_values(district_values).mean()
+    delta_f = mean_sensitivity(n)
+    scale_b = delta_f / eps
+    noise_a = dp["查詢A_平均"] - clipped_mean
+
+    def tex_num(x: float) -> str:
+        """LaTeX 中的千分位：3{,}000{,}000"""
+        return f"{x:,.0f}".replace(",", "{,}")
+
+    st.subheader(f"📐 差分隱私的四個步驟（以{target_district} {n} 人、ε = {eps:g} 為例）")
+    s1, s2, s3, s4 = st.columns(4)
+    with s1.container(border=True):
+        st.markdown('<div class="step-title">① 截斷 Clipping</div>'
+                    '<div class="step-why">替收入設上限，讓任何一個人的影響都有天花板</div>',
+                    unsafe_allow_html=True)
+        st.latex(r"x_i' = \min(\max(x_i,\,0),\; B)")
+        st.latex(rf"B = {tex_num(DEFAULT_BOUND)}")
+        st.caption(f"{target_district} {n} 人中有 {n_clipped} 人超過上限。"
+                   "代價：超過的人被當成 B，平均會略為偏低（偏差）")
+    with s2.container(border=True):
+        st.markdown('<div class="step-title">② 敏感度 Sensitivity</div>'
+                    '<div class="step-why">換掉一個人，平均數最多會改變多少？</div>',
+                    unsafe_allow_html=True)
+        st.latex(r"\Delta f = \frac{B}{n}")
+        st.latex(rf"= \frac{{{tex_num(DEFAULT_BOUND)}}}{{{n}}} = {tex_num(delta_f)}")
+        st.caption(f"最極端：把收入 0 的人換成收入 B 的人，平均最多變動 {delta_f:,.0f} 元")
+    with s3.container(border=True):
+        st.markdown('<div class="step-title">③ 雜訊尺度 Laplace</div>'
+                    '<div class="step-why">ε 越小，雜訊越大，隱私越強</div>',
+                    unsafe_allow_html=True)
+        st.latex(r"b = \frac{\Delta f}{\varepsilon}")
+        st.latex(rf"= \frac{{{tex_num(delta_f)}}}{{{eps:g}}} = {tex_num(scale_b)}")
+        st.caption("Laplace 分布：中間尖、兩側指數遞減，平均為 0（不會系統性偏高或偏低）")
+    with s4.container(border=True):
+        st.markdown('<div class="step-title">④ 加雜訊後發布</div>'
+                    '<div class="step-why">真實平均 + 隨機抽出的雜訊</div>',
+                    unsafe_allow_html=True)
+        st.latex(r"\tilde{\mu} = \bar{x}' + \mathrm{Lap}(0,\, b)")
+        st.latex(rf"= {tex_num(clipped_mean)} {'+' if noise_a >= 0 else '-'} {tex_num(abs(noise_a))}")
+        st.caption(f"這次抽到的雜訊是 {noise_a:+,.0f} 元 → 發布 {dp['查詢A_平均']:,.0f} 元")
+
+    st.markdown("#### 同樣的攻擊再做一次")
+    # 兩個查詢都要保留（攻擊需要兩者相減），但縮成一張小表，讓下方「推算 vs 真實」成為主角
+    rows = []
+    for key, label in [("A", f"查詢 A：{target_district}全部"), ("B", f"查詢 B：排除目標")]:
+        true_value, released_value = exact[f"查詢{key}_平均"], dp[f"查詢{key}_平均"]
+        rows.append(f"| {label} | {dp[f'查詢{key}_人數']} 人 | {true_value:,.0f} | "
+                    f"**{released_value:,.0f}** | {released_value - true_value:+,.0f} |")
+    st.markdown("| 發布的統計 | 人數 | 真實平均 | 差分隱私發布 | 誤差 |\n|---|---:|---:|---:|---:|\n"
+                + "\n".join(rows))
+    worst = max(abs(dp[f"查詢{k}_平均"] - exact[f"查詢{k}_平均"]) / exact[f"查詢{k}_平均"] for k in "AB")
+    if worst < 0.1:
+        st.caption(f"單獨看，每個發布的平均數都接近真實值（誤差 {worst:.1%} 以內），對統計用途來說夠用。")
+    else:
+        st.caption(f"ε = {eps:g} 時雜訊太大，連平均數本身都偏差 {worst:.0%}——"
+                   "隱私很強，但統計也不準了。這就是第三幕要談的取捨。")
 
     c1, c2 = st.columns(2)
     c1.metric("攻擊者推算的收入", money(dp["推算收入"]))
@@ -151,8 +210,6 @@ with tab2:
         # 雜訊是隨機的，偶爾會猜得接近；但攻擊者無從得知哪一次是準的
         st.warning(f"這次推算誤差 {abs(dp['誤差']):,.0f} 元，碰巧接近——"
                    "但攻擊者無法知道哪一次是準的，所以仍然無法確定目標的收入。")
-    st.caption(f"為什麼？攻擊要把平均乘以人數（{dp['查詢A_人數']}）還原成總和，"
-               f"雜訊也被放大 {dp['查詢A_人數']} 倍。這次攻擊做了 2 次查詢，共消耗隱私預算 2ε = {2 * eps:g}。")
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +258,10 @@ with tab3:
     st.plotly_chart(fig, width="stretch")
 
     # --- 長條圖：各區真實平均 vs 差分隱私發布平均 ---
-    st.subheader(f"ε = {eps3:g} 時，各區平均收入的發布結果")
+    st.subheader(f"ε = {eps3:g} 時，{largest} vs {smallest} 平均收入的發布結果")
     rng = np.random.default_rng([SEED, int(eps3 * 100), 3])
-    order = sizes.index.tolist()   # 依人數由多到少
+    # 只比較人數最多與最少的兩區（中區 vs 山腳區），對比最明顯、畫面也不擁擠
+    order = [largest, smallest]
     true_means, released = [], []
     for district in order:
         values = df.loc[df["區"] == district, "年收入"].to_numpy(dtype=float)
@@ -226,7 +284,17 @@ with tab3:
         legend=dict(orientation="h", y=1.14, x=0, font_size=18),
     )
     st.plotly_chart(bar, width="stretch")
-    st.caption("人越少的區，雜訊相對越大——差分隱私適合大群體的統計。")
+
+    # 為什麼人少的區誤差大：Laplace(0, b) 的平均絕對值 = b = B / (n·ε)
+    f1, f2 = st.columns([1, 1.4])
+    with f1:
+        st.latex(r"\text{E}\,|\text{noise}| = b = \frac{B}{n \cdot \varepsilon}")
+    with f2:
+        b_large = DEFAULT_BOUND / (sizes[largest] * eps3)
+        b_small = DEFAULT_BOUND / (sizes[smallest] * eps3)
+        st.markdown(f"ε = {eps3:g} 時，平均雜訊：**{largest}（{sizes[largest]:,} 人）約 {b_large:,.0f} 元**、"
+                    f"**{smallest}（{sizes[smallest]:,} 人）約 {b_small:,.0f} 元**。")
+        st.caption("人越少的區，雜訊相對越大——差分隱私適合大群體的統計。")
 
     st.markdown('<div class="policy-line">ε 越小越保護隱私，但數字越不準——'
                 "這是政策需要決定的取捨，不只是技術問題。</div>", unsafe_allow_html=True)

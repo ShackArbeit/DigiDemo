@@ -56,12 +56,16 @@ def issue_token(consent: dict, issued: datetime) -> tuple[str, datetime]:
 
 def decode_token(token: str) -> dict:
     """
-    驗證簽章並取出內容。簽章不對（被竄改或偽造）會丟出 jwt.InvalidTokenError。
-    到期時間不在這裡由 pyjwt 檢查，而是由呼叫端用 deps.now() 檢查：
-    這樣整個系統只有一個時鐘，情境 4 的「時間快轉」才會對令牌也生效。
+    驗證簽章並取出內容。簽章不對（被竄改或偽造）會丟出 jwt.InvalidSignatureError。
+
+    所有「時間」相關的檢查（exp 到期、iat 簽發時間、nbf 生效時間）都關掉，
+    改由呼叫端用 deps.now() 檢查：整個系統只有一個時鐘。
+    否則情境 4「時間快轉」之後，令牌的簽發時間會在電腦真實時間的「未來」，
+    pyjwt 會誤判為「令牌尚未生效」（ImmatureSignatureError）。
     """
     return jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM],
-                      options={"verify_exp": False, "require": ["exp", "consent_id", "scopes"]})
+                      options={"verify_exp": False, "verify_iat": False, "verify_nbf": False,
+                               "require": ["exp", "iat", "consent_id", "scopes"]})
 
 
 @router.post("/token")
